@@ -33,7 +33,7 @@ jobs:
         run: ./build-creator.sh
 
       - name: Upload desktop artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: creator-release
           path: |
@@ -92,7 +92,7 @@ jobs:
           ./build-app.sh
 
       - name: Upload Android artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: android-release
           path: prebuilts/whitelist-bypass.apk
