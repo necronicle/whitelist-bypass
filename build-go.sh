@@ -40,7 +40,7 @@ command -v gobind >/dev/null || { echo "gobind not found, run: go install golang
 cd "$ROOT/relay"
 
 echo "Building gomobile .aar..."
-gomobile bind -v -target=android -androidapi 23 -o mobile.aar ./mobile/ 2>&1
+gomobile bind -target=android -androidapi 23 -o mobile.aar ./mobile/
 
 echo "Copying .aar to android-app/libs..."
 mkdir -p ../android-app/app/libs

@@ -4,6 +4,22 @@ set -e
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 RELAY_DIR="$ROOT/relay"
 CREATOR_DIR="$ROOT/creator-app"
+PREBUILTS_DIR="$ROOT/prebuilts"
+
+cleanup_stale_outputs() {
+    rm -f \
+        "$PREBUILTS_DIR"/WhitelistBypass\ Creator-* \
+        "$PREBUILTS_DIR/SHA256SUMS.txt"
+}
+
+cleanup_intermediates() {
+    rm -rf \
+        "$PREBUILTS_DIR/mac-arm64" \
+        "$PREBUILTS_DIR/win-unpacked" \
+        "$PREBUILTS_DIR/win-ia32-unpacked" \
+        "$PREBUILTS_DIR/linux-unpacked"
+    rm -f "$PREBUILTS_DIR/builder-debug.yml"
+}
 
 echo "=== Building relay binaries ==="
 cd "$RELAY_DIR"
@@ -21,15 +37,15 @@ GOOS=windows GOARCH=386 go build -o relay-windows-ia32.exe .
 
 echo "Linux x64..."
 GOOS=linux GOARCH=amd64 go build -o relay-linux-x64 .
-echo "Linux x86..."
-GOOS=linux GOARCH=386 go build -o relay-linux-ia32 .
 
-ls -lh relay-darwin relay-windows-*.exe relay-linux-*
+ls -lh relay-darwin relay-windows-*.exe relay-linux-x64
 
 echo ""
 echo "=== Building Electron apps ==="
 cd "$CREATOR_DIR"
-npm install --quiet 2>&1
+cleanup_stale_outputs
+cleanup_intermediates
+npm ci
 
 # macOS (universal binary already)
 echo ""
@@ -55,8 +71,14 @@ cp "$RELAY_DIR/relay-linux-x64" "$RELAY_DIR/relay-bundle"
 npx electron-builder --linux --x64
 
 # Cleanup
-rm -f "$RELAY_DIR/relay-bundle" "$RELAY_DIR/relay-bundle.exe"
+rm -f \
+    "$RELAY_DIR/relay-bundle" \
+    "$RELAY_DIR/relay-bundle.exe" \
+    "$RELAY_DIR/relay-windows-x64.exe" \
+    "$RELAY_DIR/relay-windows-ia32.exe" \
+    "$RELAY_DIR/relay-linux-x64"
+cleanup_intermediates
 
 echo ""
 echo "=== Done ==="
-ls -lh "$ROOT/prebuilts/"
+ls -lh "$PREBUILTS_DIR/"

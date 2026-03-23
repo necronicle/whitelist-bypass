@@ -25,6 +25,10 @@ fi
 
 [ -n "$ANDROID_HOME" ] && [ -d "$ANDROID_HOME" ] || { echo "Android SDK not found. Set ANDROID_HOME or ANDROID_SDK_ROOT."; exit 1; }
 
+if [ "${SKIP_GO_BUILD:-0}" != "1" ]; then
+    "$ROOT/build-go.sh"
+fi
+
 cd "$ROOT/android-app"
 
 [ -f "./gradlew" ] || { echo "gradlew not found"; exit 1; }
@@ -32,7 +36,7 @@ cd "$ROOT/android-app"
 printf 'sdk.dir=%s\n' "$ANDROID_HOME" > local.properties
 
 echo "Building APK..."
-./gradlew assembleDebug
+./gradlew --no-daemon assembleDebug
 
 APK="app/build/outputs/apk/debug/app-debug.apk"
 if [ -f "$APK" ]; then

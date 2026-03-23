@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  relay:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: relay
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: relay/go.mod
+          cache-dependency-path: relay/go.sum
+
+      - name: Test relay
+        run: go test ./...
+
+      - name: Build relay
+        run: go build .
+
+  creator:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: creator-app
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: creator-app/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check main process syntax
+        run: node --check main.js
+
+      - name: Check preload syntax
+        run: node --check preload.js

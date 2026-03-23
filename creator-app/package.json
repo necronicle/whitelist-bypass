@@ -39,6 +39,8 @@
     },
     "linux": {
       "target": "AppImage",
+      "artifactName": "${productName}-${version}.${ext}",
+      "category": "Utility",
       "icon": "resources/icon.png",
       "extraResources": [
         { "from": "../relay/relay-bundle", "to": "relay" }

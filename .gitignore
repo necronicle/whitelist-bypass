@@ -1,4 +1,15 @@
 .DS_Store
+/.idea/
+/.vscode/
+*.iml
+creator-app/node_modules/
+creator-app/dist/
+creator-app/.electron-builder/
+android-app/.gradle/
+android-app/local.properties
+android-app/app/libs/mobile.aar
+relay/mobile-sources.jar
+relay/relay
 relay/mobile.aar
 relay/relay-*
 prebuilts/

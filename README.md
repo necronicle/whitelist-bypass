@@ -60,7 +60,7 @@ Traffic goes through the platform's TURN servers which are whitelisted. To the n
 
 ## Prebuilt binaries
 
-Run `./build-creator.sh` and `./build-app.sh` to produce binaries in `prebuilts/`:
+Run `./build-release.sh` to produce the full release set in `prebuilts/`:
 
 | File | Platform |
 |---|---|
@@ -69,6 +69,7 @@ Run `./build-creator.sh` and `./build-app.sh` to produce binaries in `prebuilts/
 | `WhitelistBypass Creator-*-ia32.exe` | Windows x86 |
 | `WhitelistBypass Creator-*.AppImage` | Linux x64 |
 | `whitelist-bypass.apk` | Android |
+| `SHA256SUMS.txt` | Checksums for release artifacts |
 
 ## Setup
 
@@ -92,12 +93,12 @@ Install and run the Electron app from `prebuilts/`. It bundles the Go relay auto
 
 ### Requirements
 
-- Go 1.21+
+- Go 1.26+
 - gomobile (`go install golang.org/x/mobile/cmd/gomobile@latest`)
 - gobind (`go install golang.org/x/mobile/cmd/gobind@latest`)
-- Android SDK + NDK 29
-- Java 11+
-- Node.js 18+
+- Android SDK Command-line Tools + NDK `29.0.14206865`
+- Java 17+
+- Node.js 20+
 
 ### Build scripts
 
@@ -106,11 +107,17 @@ Install and run the Electron app from `prebuilts/`. It bundles the Go relay auto
 ./build-go.sh
 
 # Build Android APK -> prebuilts/whitelist-bypass.apk
+# Rebuilds the gomobile .aar first by default.
 ./build-app.sh
 
-# Build Electron apps for all platforms -> prebuilts/
+# Build Electron apps for all release targets -> prebuilts/
 ./build-creator.sh
+
+# Build the full release set and checksums -> prebuilts/
+./build-release.sh
 ```
+
+`build-go.sh` and `build-app.sh` automatically detect Homebrew-installed Java/Android toolchains on macOS. If you want to reuse an existing gomobile output while iterating on the Android UI, run `SKIP_GO_BUILD=1 ./build-app.sh`.
 
 ### Relay cross-compilation
 
@@ -120,3 +127,9 @@ The Go relay is split into platform-specific files:
 - `relay/mobile/tun_stub.go` - Desktop stub (no tun2socks needed)
 
 This allows cross-compiling the relay for macOS/Windows/Linux without CGo or Android NDK.
+
+## Repository maintenance
+
+- CI runs Go tests and desktop app sanity checks on every push and pull request.
+- Release builds are defined in GitHub Actions and can be triggered with a `v*` tag or manually.
+- Generated artifacts such as relay binaries, `.aar` files, unpacked Electron bundles, and `prebuilts/` outputs are not meant to be committed.
