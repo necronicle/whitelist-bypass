@@ -5,6 +5,7 @@ import android.annotation.SuppressLint
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Intent
+import android.net.Uri
 import android.net.VpnService
 import android.os.Bundle
 import android.webkit.*
@@ -18,6 +19,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
+import androidx.core.content.ContextCompat
 import mobile.Mobile
 import mobile.LogCallback
 
@@ -26,6 +28,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var webView: WebView
     private lateinit var logView: TextView
     private lateinit var urlInput: EditText
+    private var relayStarted = false
+    private var vpnRequested = false
 
     private val vpnLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -33,6 +37,7 @@ class MainActivity : AppCompatActivity() {
         if (result.resultCode == RESULT_OK) {
             startVpnService()
         } else {
+            vpnRequested = false
             appendLog("VPN permission denied")
         }
     }
@@ -69,11 +74,20 @@ class MainActivity : AppCompatActivity() {
 
         val goButton = findViewById<Button>(R.id.goButton)
         goButton.setOnClickListener {
-            val url = urlInput.text.toString().trim()
-            if (url.isNotEmpty()) {
-                appendLog("Loading: $url")
-                webView.loadUrl(url)
+            val rawUrl = urlInput.text.toString().trim()
+            val url = normalizeCallUrl(rawUrl)
+            if (url == null) {
+                appendLog("Unsupported call link: $rawUrl")
+                Toast.makeText(this, "Use a VK Call or Telemost link", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
             }
+
+            if (url != rawUrl) {
+                urlInput.setText(url)
+            }
+
+            appendLog("Loading: $url")
+            webView.loadUrl(url)
         }
 
         findViewById<ImageButton>(R.id.copyLogsButton).setOnClickListener {
@@ -88,11 +102,20 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        if (!TunnelVpnService.isRunning) {
+            vpnRequested = false
+        }
+    }
+
     private fun updateVpnStatus(status: VpnStatus) {
         TunnelVpnService.instance?.updateStatus(status)
     }
 
     private fun startRelay() {
+        if (relayStarted) return
+        relayStarted = true
         val cb = LogCallback { msg ->
             appendLog(msg)
             if (msg.contains("browser connected")) updateVpnStatus(VpnStatus.TUNNEL_ACTIVE)
@@ -102,6 +125,7 @@ class MainActivity : AppCompatActivity() {
             try {
                 Mobile.startJoiner(9000, 1080, cb)
             } catch (e: Exception) {
+                relayStarted = false
                 appendLog("Relay error: ${e.message}")
             }
         }.start()
@@ -114,9 +138,8 @@ class MainActivity : AppCompatActivity() {
             javaScriptEnabled = true
             domStorageEnabled = true
             mediaPlaybackRequiresUserGesture = false
-            allowContentAccess = true
-            allowFileAccess = true
-            databaseEnabled = true
+            allowContentAccess = false
+            allowFileAccess = false
             setSupportMultipleWindows(false)
             useWideViewPort = true
             loadWithOverviewMode = true
@@ -199,7 +222,9 @@ if(oac){var nac=function(){var c=new oac();c.suspend();
     private fun appendLog(msg: String) {
         runOnUiThread {
             val clean = msg.replace("[HOOK] ", "")
-            logView.append("$clean\n")
+            val current = logView.text.toString()
+            val trimmed = if (current.length > 30000) current.takeLast(20000) else current
+            logView.text = trimmed + clean + "\n"
             val scrollAmount = logView.layout?.let {
                 it.getLineTop(logView.lineCount) - logView.height
             } ?: 0
@@ -208,6 +233,10 @@ if(oac){var nac=function(){var c=new oac();c.suspend();
     }
 
     private fun requestVpn() {
+        if (TunnelVpnService.isRunning || vpnRequested) {
+            return
+        }
+        vpnRequested = true
         val intent = VpnService.prepare(this)
         if (intent != null) {
             vpnLauncher.launch(intent)
@@ -217,10 +246,30 @@ if(oac){var nac=function(){var c=new oac();c.suspend();
     }
 
     private fun startVpnService() {
+        if (TunnelVpnService.isRunning) {
+            appendLog("VPN already running")
+            return
+        }
         val intent = Intent(this, TunnelVpnService::class.java)
-        startService(intent)
+        ContextCompat.startForegroundService(this, intent)
         appendLog("VPN started")
         updateVpnStatus(VpnStatus.TUNNEL_ACTIVE)
+    }
+
+    private fun normalizeCallUrl(rawUrl: String): String? {
+        if (rawUrl.isBlank()) return null
+
+        val candidate = if ("://" in rawUrl) rawUrl else "https://$rawUrl"
+        val uri = Uri.parse(candidate)
+        val scheme = uri.scheme?.lowercase() ?: return null
+        val host = uri.host?.lowercase() ?: return null
+        if (scheme != "http" && scheme != "https") return null
+
+        return when {
+            host == "vk.com" || host.endsWith(".vk.com") -> candidate
+            host == "telemost.yandex.ru" || host.endsWith(".telemost.yandex.ru") -> candidate
+            else -> null
+        }
     }
 
 

@@ -3,7 +3,7 @@ const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 
-var hooksDir = app.isPackaged
+const hooksDir = app.isPackaged
   ? path.join(process.resourcesPath, 'hooks')
   : path.join(__dirname, '..', 'hooks');
 const hookVk = fs.readFileSync(path.join(hooksDir, 'creator-vk.js'), 'utf8');
@@ -13,56 +13,141 @@ const logCapture = "window.__hookLogs=window.__hookLogs||[];var _ol=console.log;
 let mainWindow;
 let relayProcess;
 
+function hookTargetFromUrl(rawUrl) {
+  try {
+    const host = new URL(rawUrl).hostname.toLowerCase();
+    if (host === 'telemost.yandex.ru' || host.endsWith('.telemost.yandex.ru')) {
+      return 'telemost';
+    }
+    if (host === 'vk.com' || host.endsWith('.vk.com')) {
+      return 'vk';
+    }
+  } catch (_) {}
+  return null;
+}
+
+function buildHookCode(url) {
+  const target = hookTargetFromUrl(url);
+  if (!target) {
+    return null;
+  }
+
+  const hook = target === 'telemost' ? hookTelemost : hookVk;
+  return [
+    logCapture,
+    '(function(){',
+    '  if (window.__wbHookInstalled) return;',
+    '  window.__wbHookInstalled = true;',
+    hook,
+    '})();'
+  ].join('\n');
+}
+
+function emitRelayLog(msg) {
+  console.log('[relay]', msg);
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('relay-log', msg);
+  }
+}
+
+function resolveRelayBinary() {
+  const baseDir = app.isPackaged
+    ? process.resourcesPath
+    : path.join(__dirname, '..', 'relay');
+
+  const candidatesByPlatform = {
+    darwin: ['relay', 'relay-darwin'],
+    linux: ['relay', 'relay-linux-x64', 'relay-linux-ia32'],
+    win32: ['relay.exe', 'relay-windows-x64.exe', 'relay-windows-ia32.exe']
+  };
+
+  const candidates = candidatesByPlatform[process.platform] || ['relay'];
+  for (const name of candidates) {
+    const candidate = path.join(baseDir, name);
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
 function startRelay() {
+  if (relayProcess) {
+    return;
+  }
+
   const net = require('net');
   const sock = new net.Socket();
+  let settled = false;
+
+  const finish = (fn) => () => {
+    if (settled) {
+      return;
+    }
+    settled = true;
+    sock.destroy();
+    fn();
+  };
+
   sock.setTimeout(1000);
-  sock.on('connect', () => {
-    sock.destroy();
-    console.log('[relay] already running on :9000');
-    if (mainWindow) mainWindow.webContents.send('relay-log', 'Using existing relay on :9000');
-  });
-  sock.on('error', () => {
-    sock.destroy();
-    spawnRelay();
-  });
-  sock.on('timeout', () => {
-    sock.destroy();
-    spawnRelay();
-  });
+  sock.once('connect', finish(() => {
+    emitRelayLog('Using existing relay on :9000');
+  }));
+  sock.once('error', finish(spawnRelay));
+  sock.once('timeout', finish(spawnRelay));
   sock.connect(9000, '127.0.0.1');
 }
 
 function spawnRelay() {
-  var relayName = process.platform === 'win32' ? 'relay.exe' : 'relay';
-  var relayPath = app.isPackaged
-    ? path.join(process.resourcesPath, relayName)
-    : path.join(__dirname, '..', 'relay', relayName);
+  const relayPath = resolveRelayBinary();
+  if (!relayPath) {
+    emitRelayLog('Relay binary not found. Build the relay before starting the creator app.');
+    return;
+  }
+
   relayProcess = spawn(relayPath, ['--mode', 'creator'], {
     stdio: ['ignore', 'pipe', 'pipe']
   });
+
+  emitRelayLog(`Starting relay: ${path.basename(relayPath)}`);
+
+  relayProcess.on('error', (err) => {
+    emitRelayLog(`Relay failed to start: ${err.message}`);
+    relayProcess = null;
+  });
+
   relayProcess.stdout.on('data', (data) => {
     data.toString().trim().split('\n').forEach((msg) => {
       if (!msg) return;
-      console.log('[relay]', msg);
-      if (mainWindow) mainWindow.webContents.send('relay-log', msg);
+      emitRelayLog(msg);
     });
   });
   relayProcess.stderr.on('data', (data) => {
     data.toString().trim().split('\n').forEach((msg) => {
       if (!msg) return;
-      console.log('[relay]', msg);
-      if (mainWindow) mainWindow.webContents.send('relay-log', msg);
+      emitRelayLog(msg);
     });
   });
-  relayProcess.on('close', (code) => {
-    if (mainWindow) mainWindow.webContents.send('relay-log', 'Relay exited with code ' + code);
+  relayProcess.on('close', (code, signal) => {
+    emitRelayLog(signal ? `Relay exited via signal ${signal}` : `Relay exited with code ${code}`);
+    relayProcess = null;
   });
 }
 
 function stripCSP(ses) {
+  if (ses.__wbCspPatched) {
+    return;
+  }
+  ses.__wbCspPatched = true;
+
   ses.webRequest.onHeadersReceived((details, callback) => {
-    var headers = { ...details.responseHeaders };
+    if (!hookTargetFromUrl(details.url)) {
+      callback({ responseHeaders: details.responseHeaders });
+      return;
+    }
+
+    const headers = { ...details.responseHeaders };
     delete headers['content-security-policy'];
     delete headers['Content-Security-Policy'];
     delete headers['content-security-policy-report-only'];
@@ -74,10 +159,13 @@ function stripCSP(ses) {
 function createWindow() {
   const ses = session.fromPartition('persist:creator');
   stripCSP(ses);
-  ses.setPermissionRequestHandler((webContents, permission, callback) => {
-    callback(true);
+  ses.setPermissionRequestHandler((webContents, permission, callback, details) => {
+    const sourceUrl = (details && details.requestingUrl) || webContents.getURL();
+    callback(Boolean(hookTargetFromUrl(sourceUrl)));
   });
-  ses.setPermissionCheckHandler(() => true);
+  ses.setPermissionCheckHandler((webContents, permission, requestingOrigin) => {
+    return Boolean(hookTargetFromUrl(requestingOrigin || webContents.getURL()));
+  });
 
   mainWindow = new BrowserWindow({
     width: 1200,
@@ -95,7 +183,7 @@ function createWindow() {
 
   app.on('session-created', stripCSP);
 
-  mainWindow.loadFile('index.html');
+  mainWindow.loadFile(path.join(__dirname, 'index.html'));
   mainWindow.on('closed', () => { mainWindow = null; });
 }
 
@@ -108,8 +196,7 @@ function killRelay() {
 
 
 ipcMain.handle('get-hook-code', (e, url) => {
-  var hook = url.includes('telemost.yandex') ? hookTelemost : hookVk;
-  return logCapture + hook;
+  return buildHookCode(url);
 });
 
 app.whenReady().then(() => {

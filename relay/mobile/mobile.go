@@ -26,7 +26,6 @@ const (
 
 const readBufSize = 65536
 
-
 var framePool = sync.Pool{
 	New: func() any {
 		buf := make([]byte, 5+readBufSize)
@@ -72,47 +71,47 @@ func logMsg(format string, args ...any) {
 	}
 }
 
-
 type wsWriter struct {
-	ws   *websocket.Conn
-	ch   chan []byte
-	done chan struct{}
+	ws     *websocket.Conn
+	mu     sync.Mutex
+	closed bool
 }
 
 func newWSWriter(ws *websocket.Conn) *wsWriter {
-	w := &wsWriter{
-		ws:   ws,
-		ch:   make(chan []byte, 1024),
-		done: make(chan struct{}),
-	}
-	go w.loop()
-	return w
+	return &wsWriter{ws: ws}
 }
 
-func (w *wsWriter) loop() {
-	defer close(w.done)
-	for msg := range w.ch {
-		if err := w.ws.WriteMessage(websocket.BinaryMessage, msg); err != nil {
-			logMsg("ws write error: %v", err)
-			return
-		}
-	}
-}
+func (w *wsWriter) send(msg []byte) bool {
+	cp := append([]byte(nil), msg...)
 
-func (w *wsWriter) send(msg []byte) {
-	cp := make([]byte, len(msg))
-	copy(cp, msg)
-	select {
-	case w.ch <- cp:
-	default:
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if w.closed {
+		return false
 	}
+
+	if err := w.ws.WriteMessage(websocket.BinaryMessage, cp); err != nil {
+		w.closed = true
+		logMsg("ws write error: %v", err)
+		_ = w.ws.Close()
+		return false
+	}
+
+	return true
 }
 
 func (w *wsWriter) close() {
-	close(w.ch)
-	<-w.done
-}
+	w.mu.Lock()
+	defer w.mu.Unlock()
 
+	if w.closed {
+		return
+	}
+
+	w.closed = true
+	_ = w.ws.Close()
+}
 
 func StartJoiner(wsPort, socksPort int, cb LogCallback) error {
 	logCb = cb
@@ -149,6 +148,7 @@ func StartCreator(wsPort int, cb LogCallback) error {
 }
 
 type joinerRelay struct {
+	writerMu   sync.RWMutex
 	writer     *wsWriter
 	conns      sync.Map
 	udpClients sync.Map
@@ -168,6 +168,33 @@ type udpClient struct {
 	udpConn     *net.UDPConn
 	clientAddr  *net.UDPAddr
 	socksHeader []byte
+}
+
+func (j *joinerRelay) swapWriter(next *wsWriter) {
+	j.writerMu.Lock()
+	prev := j.writer
+	j.writer = next
+	j.writerMu.Unlock()
+	if prev != nil {
+		prev.close()
+	}
+}
+
+func (j *joinerRelay) clearWriter(target *wsWriter) {
+	j.writerMu.Lock()
+	if j.writer == target {
+		j.writer = nil
+	}
+	j.writerMu.Unlock()
+	if target != nil {
+		target.close()
+	}
+}
+
+func (j *joinerRelay) currentWriter() *wsWriter {
+	j.writerMu.RLock()
+	defer j.writerMu.RUnlock()
+	return j.writer
 }
 
 func (j *joinerRelay) handleUDPAssociate(tcpConn net.Conn) {
@@ -248,7 +275,12 @@ func (j *joinerRelay) handleUDPAssociate(tcpConn net.Conn) {
 			payload[0] = byte(len(dstAddr))
 			copy(payload[1:], dstAddr)
 			copy(payload[1+len(dstAddr):], buf[headerLen:n])
-			j.udpClients.Store(id, &udpClient{udpConn: udpConn, clientAddr: clientAddr, socksHeader: buf[:headerLen]})
+			headerCopy := append([]byte(nil), buf[:headerLen]...)
+			j.udpClients.Store(id, &udpClient{
+				udpConn:     udpConn,
+				clientAddr:  clientAddr,
+				socksHeader: headerCopy,
+			})
 			j.send(id, msgUDP, payload)
 		}
 	}()
@@ -260,7 +292,9 @@ func (j *joinerRelay) handleWS(w http.ResponseWriter, r *http.Request) {
 		logMsg("joiner: ws upgrade error: %v", err)
 		return
 	}
-	j.writer = newWSWriter(ws)
+	writer := newWSWriter(ws)
+	j.swapWriter(writer)
+	defer j.clearWriter(writer)
 	j.once.Do(func() { close(j.ready) })
 	logMsg("joiner: browser connected via WebSocket")
 	for {
@@ -275,10 +309,6 @@ func (j *joinerRelay) handleWS(w http.ResponseWriter, r *http.Request) {
 }
 
 func (j *joinerRelay) handleMessage(connID uint32, msgType byte, payload []byte) {
-	val, ok := j.conns.Load(connID)
-	if !ok {
-		return
-	}
 	if msgType == msgUDPReply {
 		uval, ok := j.udpClients.Load(connID)
 		if !ok {
@@ -290,6 +320,10 @@ func (j *joinerRelay) handleMessage(connID uint32, msgType byte, payload []byte)
 		copy(reply[len(uc.socksHeader):], payload)
 		uc.udpConn.WriteToUDP(reply, uc.clientAddr)
 		j.udpClients.Delete(connID)
+		return
+	}
+	val, ok := j.conns.Load(connID)
+	if !ok {
 		return
 	}
 	sc := val.(*socksConn)
@@ -307,7 +341,7 @@ func (j *joinerRelay) handleMessage(connID uint32, msgType byte, payload []byte)
 }
 
 func (j *joinerRelay) send(connID uint32, msgType byte, payload []byte) {
-	w := j.writer
+	w := j.currentWriter()
 	if w == nil {
 		return
 	}
@@ -419,8 +453,36 @@ func (j *joinerRelay) handleSOCKS(conn net.Conn) {
 }
 
 type creatorRelay struct {
-	writer *wsWriter
-	conns  sync.Map
+	writerMu sync.RWMutex
+	writer   *wsWriter
+	conns    sync.Map
+}
+
+func (c *creatorRelay) swapWriter(next *wsWriter) {
+	c.writerMu.Lock()
+	prev := c.writer
+	c.writer = next
+	c.writerMu.Unlock()
+	if prev != nil {
+		prev.close()
+	}
+}
+
+func (c *creatorRelay) clearWriter(target *wsWriter) {
+	c.writerMu.Lock()
+	if c.writer == target {
+		c.writer = nil
+	}
+	c.writerMu.Unlock()
+	if target != nil {
+		target.close()
+	}
+}
+
+func (c *creatorRelay) currentWriter() *wsWriter {
+	c.writerMu.RLock()
+	defer c.writerMu.RUnlock()
+	return c.writer
 }
 
 func (c *creatorRelay) handleWS(w http.ResponseWriter, r *http.Request) {
@@ -429,7 +491,9 @@ func (c *creatorRelay) handleWS(w http.ResponseWriter, r *http.Request) {
 		logMsg("creator: ws upgrade error: %v", err)
 		return
 	}
-	c.writer = newWSWriter(ws)
+	writer := newWSWriter(ws)
+	c.swapWriter(writer)
+	defer c.clearWriter(writer)
 	logMsg("creator: browser connected via WebSocket")
 	for {
 		_, msg, err := ws.ReadMessage()
@@ -462,7 +526,7 @@ func (c *creatorRelay) handleMessage(connID uint32, msgType byte, payload []byte
 }
 
 func (c *creatorRelay) send(connID uint32, msgType byte, payload []byte) {
-	w := c.writer
+	w := c.currentWriter()
 	if w == nil {
 		return
 	}

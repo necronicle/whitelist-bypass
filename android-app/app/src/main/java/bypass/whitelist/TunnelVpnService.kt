@@ -45,7 +45,7 @@ class TunnelVpnService : VpnService() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
-            stop()
+            stopTunnel()
             return START_NOT_STICKY
         }
         start()
@@ -53,7 +53,10 @@ class TunnelVpnService : VpnService() {
     }
 
     private fun start() {
-        if (isRunning) return
+        if (isRunning) {
+            updateStatus(VpnStatus.TUNNEL_ACTIVE)
+            return
+        }
 
         startForegroundNotification()
 
@@ -74,6 +77,7 @@ class TunnelVpnService : VpnService() {
         vpnFd = builder.establish()
         if (vpnFd == null) {
             Log.e(TAG, "Failed to establish VPN")
+            stopTunnel()
             return
         }
 
@@ -88,22 +92,37 @@ class TunnelVpnService : VpnService() {
                 Mobile.startTun2Socks(fd.toLong(), MTU.toLong(), SOCKS_PORT.toLong())
             } catch (e: Exception) {
                 Log.e(TAG, "tun2socks error: ${e.message}")
-                isRunning = false
+                updateStatus(VpnStatus.TUNNEL_LOST)
+                stopTunnel()
             }
         }.start()
     }
 
-    private fun stop() {
+    private fun stopTunnel(stopService: Boolean = true) {
+        val wasRunning = isRunning
         isRunning = false
+
+        if (wasRunning) {
+            try {
+                Mobile.stopTun2Socks()
+            } catch (e: Exception) {
+                Log.e(TAG, "tun2socks stop error: ${e.message}")
+            }
+        }
+
         try {
-            Mobile.stopTun2Socks()
+            vpnFd?.close()
         } catch (e: Exception) {
-            Log.e(TAG, "tun2socks stop error: ${e.message}")
+            Log.e(TAG, "vpn fd close error: ${e.message}")
         }
         vpnFd = null
+        instance = null
+
         @Suppress("DEPRECATION")
         stopForeground(true)
-        stopSelf()
+        if (stopService) {
+            stopSelf()
+        }
     }
 
     private fun buildNotification(text: String): Notification {
@@ -153,7 +172,7 @@ class TunnelVpnService : VpnService() {
     }
 
     override fun onDestroy() {
-        stop()
+        stopTunnel(stopService = false)
         super.onDestroy()
     }
 }

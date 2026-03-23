@@ -30,6 +30,7 @@ body { font-family: -apple-system, sans-serif; background: #1a1a1a; color: #e0e0
   <button class="btn-home" onclick="goHome()">Home</button>
   <button class="btn-vk" onclick="loadURL('https://vk.com/im')">VK Call</button>
   <button class="btn-telemost" onclick="loadURL('https://telemost.yandex.ru/')">Telemost</button>
+  <div class="link-text" id="currentUrl">No page loaded</div>
 </div>
 <div class="content" id="content">
   <div class="welcome" id="welcome">
@@ -49,6 +50,18 @@ body { font-family: -apple-system, sans-serif; background: #1a1a1a; color: #e0e0
 </div>
 <script>
 var wv = null;
+var maxLogChars = 40000;
+
+function appendLog(id, msg, prefixToStrip) {
+  var el = document.getElementById(id);
+  var text = prefixToStrip ? msg.replace(prefixToStrip, '') : msg;
+  if (el.textContent.length > maxLogChars) {
+    el.textContent = el.textContent.slice(-maxLogChars);
+  }
+  if (el.textContent.length > 0) el.textContent += '\n';
+  el.textContent += text;
+  el.scrollTop = el.scrollHeight;
+}
 
 function copyLog(id) {
   navigator.clipboard.writeText(document.getElementById(id).textContent);
@@ -66,21 +79,29 @@ function saveLogs() {
 }
 
 function appendHookLog(msg) {
-  var el = document.getElementById('hookLog');
-  if (el.textContent.length > 0) el.textContent += '\n';
-  el.textContent += msg.replace('[HOOK] ', '');
-  el.scrollTop = el.scrollHeight;
+  appendLog('hookLog', msg, '[HOOK] ');
+}
+
+function appendRelayLog(msg) {
+  appendLog('relayLog', msg);
+}
+
+function updateCurrentUrl(url) {
+  document.getElementById('currentUrl').textContent = url || 'No page loaded';
 }
 
 function goHome() {
   if (wv) { wv.remove(); wv = null; }
   document.getElementById('welcome').style.display = 'flex';
+  updateCurrentUrl('');
 }
 
 function injectHook() {
   if (!wv) return;
   var url = wv.getURL();
+  updateCurrentUrl(url);
   window.bridge.getHookCode(url).then(function(code) {
+    if (!code) return;
     wv.executeJavaScript(code).catch(function(e) {
       appendHookLog('Inject error: ' + e.message);
     });
@@ -94,18 +115,26 @@ function loadURL(url) {
   wv = document.createElement('webview');
   wv.setAttribute('src', url);
   wv.setAttribute('partition', 'persist:creator');
-  wv.setAttribute('preload', './call-preload.js');
-  wv.setAttribute('nodeintegration', '');
-  wv.setAttribute('nodeintegrationinsubframes', '');
   wv.style.width = '100%';
   wv.style.height = '100%';
   document.getElementById('content').appendChild(wv);
-  wv.addEventListener('dom-ready', function() { wv.setAudioMuted(true); });
-
-  // Inject hook on first load
+  wv.addEventListener('dom-ready', function() {
+    updateCurrentUrl(wv.getURL());
+    wv.setAudioMuted(true);
+  });
+  wv.addEventListener('did-navigate', function(e) {
+    updateCurrentUrl(e.url);
+  });
+  wv.addEventListener('did-navigate-in-page', function(e) {
+    updateCurrentUrl(e.url);
+  });
   wv.addEventListener('did-finish-load', function() {
     injectHook();
-  }, { once: true });
+  });
+  wv.addEventListener('did-fail-load', function(e) {
+    if (e.errorCode === -3) return;
+    appendHookLog('Load error: ' + e.errorDescription);
+  });
 
 }
 
@@ -120,10 +149,7 @@ setInterval(function() {
 }, 500);
 
 window.bridge.onRelayLog(function(msg) {
-  var el = document.getElementById('relayLog');
-  if (el.textContent.length > 0) el.textContent += '\n';
-  el.textContent += msg;
-  el.scrollTop = el.scrollHeight;
+  appendRelayLog(msg);
 });
 </script>
 </body>
