@@ -1,6 +1,6 @@
 {
   "name": "whitelist-bypass-creator",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Desktop creator app for Whitelist Bypass tunnel sessions",
   "author": "whitelist-bypass contributors",
   "main": "main.js",

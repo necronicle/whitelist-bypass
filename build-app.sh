@@ -36,9 +36,9 @@ cd "$ROOT/android-app"
 printf 'sdk.dir=%s\n' "$ANDROID_HOME" > local.properties
 
 echo "Building APK..."
-./gradlew --no-daemon assembleDebug
+./gradlew --no-daemon assembleRelease
 
-APK="app/build/outputs/apk/debug/app-debug.apk"
+APK="app/build/outputs/apk/release/app-release.apk"
 if [ -f "$APK" ]; then
     mkdir -p "$ROOT/prebuilts"
     cp "$APK" "$ROOT/prebuilts/whitelist-bypass.apk"

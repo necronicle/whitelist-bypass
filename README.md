@@ -106,7 +106,7 @@ Install and run the Electron app from `prebuilts/`. It bundles the Go relay auto
 # Build Go .aar for Android (includes hooks copy)
 ./build-go.sh
 
-# Build Android APK -> prebuilts/whitelist-bypass.apk
+# Build Android release APK -> prebuilts/whitelist-bypass.apk
 # Rebuilds the gomobile .aar first by default.
 ./build-app.sh
 
