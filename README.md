@@ -78,7 +78,7 @@ Run `./build-release.sh` to produce the full release set in `prebuilts/`:
 Install and run the Electron app from `prebuilts/`. It bundles the Go relay automatically.
 
 1. Open the app
-2. Click "VK Call" or "Telemost"
+2. Click "VK Call" or "Telemost" to open the platform's call landing page
 3. Log in, create a call
 4. Copy the join link, send it to the joiner
 
