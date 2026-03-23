@@ -108,13 +108,13 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Download creator artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: creator-release
           path: prebuilts
 
       - name: Download Android artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: android-release
           path: prebuilts
