@@ -4,16 +4,43 @@ updates:
     directory: "/relay"
     schedule:
       interval: "weekly"
-    open-pull-requests-limit: 5
+      day: "monday"
+      time: "04:00"
+      timezone: "Europe/Moscow"
+    open-pull-requests-limit: 2
+    labels:
+      - "dependencies"
+    groups:
+      relay-dependencies:
+        patterns:
+          - "*"
 
   - package-ecosystem: "npm"
     directory: "/creator-app"
     schedule:
       interval: "weekly"
-    open-pull-requests-limit: 5
+      day: "monday"
+      time: "04:10"
+      timezone: "Europe/Moscow"
+    open-pull-requests-limit: 2
+    labels:
+      - "dependencies"
+    groups:
+      creator-dependencies:
+        patterns:
+          - "*"
 
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
-    open-pull-requests-limit: 5
+      day: "monday"
+      time: "04:20"
+      timezone: "Europe/Moscow"
+    open-pull-requests-limit: 2
+    labels:
+      - "dependencies"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
