@@ -3,6 +3,7 @@
   "version": "0.2.0",
   "description": "Desktop creator app for Whitelist Bypass tunnel sessions",
   "author": "whitelist-bypass contributors",
+  "repository": "github:necronicle/whitelist-bypass",
   "main": "main.js",
   "scripts": {
     "start": "electron .",

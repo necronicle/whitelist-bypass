@@ -35,6 +35,14 @@ cd "$ROOT/android-app"
 
 printf 'sdk.dir=%s\n' "$ANDROID_HOME" > local.properties
 
+if [ ! -f "debug.keystore" ]; then
+    echo "Generating debug.keystore..."
+    keytool -genkeypair -v -keystore debug.keystore \
+        -storepass android -alias debug -keypass android \
+        -keyalg RSA -keysize 2048 -validity 10000 \
+        -dname "CN=Debug,O=Debug,C=US"
+fi
+
 echo "Building APK..."
 ./gradlew --no-daemon assembleRelease
 
