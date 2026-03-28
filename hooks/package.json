@@ -1,0 +1,7 @@
+{
+  "name": "whitelist-bypass-hooks",
+  "private": true,
+  "scripts": {
+    "test": "node --test tunnel-core.test.js"
+  }
+}

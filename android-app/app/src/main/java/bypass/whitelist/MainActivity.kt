@@ -29,6 +29,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var logView: TextView
     private lateinit var urlInput: EditText
     private var relayStarted = false
+    private var relayHandle: mobile.Relay? = null
     private var vpnRequested = false
 
     private val vpnLauncher = registerForActivityResult(
@@ -42,6 +43,10 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private val tunnelCore by lazy {
+        assets.open("tunnel-core.js").bufferedReader().readText()
+    }
+
     private val hookVk by lazy {
         assets.open("joiner-vk.js").bufferedReader().readText()
     }
@@ -51,7 +56,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun hookForUrl(url: String): String {
-        return if (url.contains("telemost.yandex")) hookTelemost else hookVk
+        val hook = if (url.contains("telemost.yandex")) hookTelemost else hookVk
+        return tunnelCore + "\n" + hook
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -116,20 +122,22 @@ class MainActivity : AppCompatActivity() {
     private fun startRelay() {
         if (relayStarted) return
         relayStarted = true
+        Log.d("WB", "startRelay called")
         val cb = LogCallback { msg ->
+            Log.d("WB", "relay: $msg")
             appendLog(msg)
             if (msg.contains("browser connected")) updateVpnStatus(VpnStatus.TUNNEL_ACTIVE)
             else if (msg.contains("ws read error")) updateVpnStatus(VpnStatus.TUNNEL_LOST)
         }
-        Thread {
-            try {
-                Mobile.startJoiner(9000, 1080, cb)
-            } catch (e: Exception) {
-                relayStarted = false
-                appendLog("Relay error: ${e.message}")
-            }
-        }.start()
-        appendLog("Relay started (SOCKS5 :1080, WS :9000)")
+        try {
+            relayHandle = Mobile.startJoiner(9000, 1080, cb)
+            Log.d("WB", "startJoiner returned OK")
+            appendLog("Relay started (SOCKS5 :1080, WS :9000)")
+        } catch (e: Exception) {
+            Log.e("WB", "startJoiner failed", e)
+            relayStarted = false
+            appendLog("Relay error: ${e.message}")
+        }
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -212,9 +220,18 @@ if(oac){var nac=function(){var c=new oac();c.suspend();
 })()""", null)
             }
             override fun onPageFinished(view: WebView, url: String) {
-                val hook = hookForUrl(url)
-                appendLog("Page loaded, injecting hook for $url")
-                view.evaluateJavascript(hook, null)
+                Log.d("WB", "onPageFinished: $url")
+                try {
+                    val hook = hookForUrl(url)
+                    Log.d("WB", "hook size: ${hook.length} chars")
+                    appendLog("Page loaded, injecting hook for $url")
+                    view.evaluateJavascript(hook) { result ->
+                        Log.d("WB", "evaluateJavascript result: $result")
+                    }
+                } catch (e: Exception) {
+                    Log.e("WB", "hook injection failed", e)
+                    appendLog("Hook injection error: ${e.message}")
+                }
             }
         }
     }

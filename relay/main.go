@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"whitelist-bypass/relay/mobile"
 )
@@ -28,13 +30,27 @@ func main() {
 
 	cb := stdLogger{}
 
+	var relay *mobile.Relay
+	var err error
+
 	switch *mode {
 	case "joiner":
-		log.Fatal(mobile.StartJoiner(*wsPort, *socksPort, cb))
+		relay, err = mobile.StartJoiner(*wsPort, *socksPort, cb)
 	case "creator":
-		log.Fatal(mobile.StartCreator(*wsPort, cb))
+		relay, err = mobile.StartCreator(*wsPort, cb)
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown mode: %s (use joiner or creator)\n", *mode)
 		os.Exit(1)
 	}
+
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+	<-sig
+
+	log.Print("Shutting down...")
+	relay.Stop()
 }

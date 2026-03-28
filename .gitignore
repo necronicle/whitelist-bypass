@@ -7,6 +7,7 @@ creator-app/dist/
 creator-app/.electron-builder/
 android-app/.gradle/
 android-app/local.properties
+android-app/debug.keystore
 android-app/app/libs/mobile.aar
 relay/mobile-sources.jar
 relay/relay

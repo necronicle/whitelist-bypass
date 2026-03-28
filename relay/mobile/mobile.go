@@ -1,6 +1,7 @@
 package mobile
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -14,6 +15,7 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// Protocol message types.
 const (
 	msgConnect    byte = 0x01
 	msgConnectOK  byte = 0x02
@@ -22,9 +24,25 @@ const (
 	msgClose      byte = 0x05
 	msgUDP        byte = 0x06
 	msgUDPReply   byte = 0x07
+	msgHandshake  byte = 0x08
+	msgPing       byte = 0x09
+	msgPong       byte = 0x0A
 )
 
-const readBufSize = 65536
+const (
+	readBufSize     = 65536
+	maxConns        = 1024
+	protocolVersion = 1
+
+	pingInterval    = 10 * time.Second
+	pongTimeout     = 15 * time.Second
+	connectTimeout  = 15 * time.Second
+	dialTimeout     = 10 * time.Second
+	udpTimeout      = 5 * time.Second
+
+	sendQueueSize   = 4096
+	backpressureMax = 1 << 20 // 1 MB
+)
 
 var framePool = sync.Pool{
 	New: func() any {
@@ -56,12 +74,35 @@ var upgrader = websocket.Upgrader{
 	WriteBufferSize: readBufSize,
 }
 
+// ---------------------------------------------------------------------------
+// Logging
+// ---------------------------------------------------------------------------
+
 type LogCallback interface {
 	OnLog(msg string)
 }
 
 var logCb LogCallback
 
+func slog(level, component string, connID uint32, msg string, err error) {
+	var s string
+	if connID > 0 && err != nil {
+		s = fmt.Sprintf("level=%s component=%s conn=%d msg=%q err=%q", level, component, connID, msg, err.Error())
+	} else if connID > 0 {
+		s = fmt.Sprintf("level=%s component=%s conn=%d msg=%q", level, component, connID, msg)
+	} else if err != nil {
+		s = fmt.Sprintf("level=%s component=%s msg=%q err=%q", level, component, msg, err.Error())
+	} else {
+		s = fmt.Sprintf("level=%s component=%s msg=%q", level, component, msg)
+	}
+	if logCb != nil {
+		logCb.OnLog(s)
+	} else {
+		log.Print(s)
+	}
+}
+
+// logMsg is a short alias kept for brevity inside hot paths.
 func logMsg(format string, args ...any) {
 	msg := fmt.Sprintf(format, args...)
 	if logCb != nil {
@@ -71,10 +112,70 @@ func logMsg(format string, args ...any) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Metrics
+// ---------------------------------------------------------------------------
+
+// Metrics exposes relay-level counters. All fields are safe for concurrent use.
+type Metrics struct {
+	ActiveConns atomic.Int32
+	TotalConns  atomic.Int64
+	BytesSent   atomic.Int64
+	BytesRecv   atomic.Int64
+	Errors      atomic.Int64
+}
+
+// Snapshot returns a point-in-time copy.
+func (m *Metrics) Snapshot() MetricsSnapshot {
+	return MetricsSnapshot{
+		ActiveConns: int(m.ActiveConns.Load()),
+		TotalConns:  m.TotalConns.Load(),
+		BytesSent:   m.BytesSent.Load(),
+		BytesRecv:   m.BytesRecv.Load(),
+		Errors:      m.Errors.Load(),
+	}
+}
+
+// MetricsSnapshot is a plain-data snapshot suitable for gomobile export.
+type MetricsSnapshot struct {
+	ActiveConns int
+	TotalConns  int64
+	BytesSent   int64
+	BytesRecv   int64
+	Errors      int64
+}
+
+// ---------------------------------------------------------------------------
+// Relay handle (returned by Start*)
+// ---------------------------------------------------------------------------
+
+// Relay is a handle to a running relay. Call Stop() to shut it down gracefully.
+type Relay struct {
+	cancel  context.CancelFunc
+	done    chan struct{}
+	metrics Metrics
+}
+
+// Stop shuts down the relay and waits for all goroutines to finish.
+func (r *Relay) Stop() {
+	r.cancel()
+	<-r.done
+}
+
+// GetMetrics returns a snapshot of relay metrics.
+func (r *Relay) GetMetrics() MetricsSnapshot {
+	return r.metrics.Snapshot()
+}
+
+// ---------------------------------------------------------------------------
+// wsWriter with send queue and backpressure
+// ---------------------------------------------------------------------------
+
 type wsWriter struct {
-	ws     *websocket.Conn
-	mu     sync.Mutex
-	closed bool
+	ws      *websocket.Conn
+	mu      sync.Mutex
+	closed  bool
+	pending atomic.Int64
 }
 
 func newWSWriter(ws *websocket.Conn) *wsWriter {
@@ -91,14 +192,21 @@ func (w *wsWriter) send(msg []byte) bool {
 		return false
 	}
 
+	w.pending.Add(int64(len(cp)))
 	if err := w.ws.WriteMessage(websocket.BinaryMessage, cp); err != nil {
 		w.closed = true
 		logMsg("ws write error: %v", err)
 		_ = w.ws.Close()
+		w.pending.Add(-int64(len(cp)))
 		return false
 	}
+	w.pending.Add(-int64(len(cp)))
 
 	return true
+}
+
+func (w *wsWriter) backpressure() bool {
+	return w.pending.Load() > backpressureMax
 }
 
 func (w *wsWriter) close() {
@@ -113,39 +221,111 @@ func (w *wsWriter) close() {
 	_ = w.ws.Close()
 }
 
-func StartJoiner(wsPort, socksPort int, cb LogCallback) error {
+// ---------------------------------------------------------------------------
+// StartJoiner / StartCreator
+// ---------------------------------------------------------------------------
+
+// StartJoiner starts the joiner relay. It returns a Relay handle immediately.
+// The relay runs until Stop() is called or an unrecoverable error occurs.
+func StartJoiner(wsPort, socksPort int, cb LogCallback) (*Relay, error) {
 	logCb = cb
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+
 	j := &joinerRelay{
-		conns: sync.Map{},
 		ready: make(chan struct{}),
 	}
-	mux := http.NewServeMux()
-	mux.HandleFunc("/ws", j.handleWS)
+
+	relay := &Relay{cancel: cancel, done: done}
+	j.metrics = &relay.metrics
+
+	wsMux := http.NewServeMux()
+	wsMux.HandleFunc("/ws", j.handleWS)
+
+	wsServer := &http.Server{
+		Addr:    fmt.Sprintf("127.0.0.1:%d", wsPort),
+		Handler: wsMux,
+	}
+
+	socksAddr := fmt.Sprintf("127.0.0.1:%d", socksPort)
+	socksLn, err := net.Listen("tcp", socksAddr)
+	if err != nil {
+		cancel()
+		close(done)
+		return nil, err
+	}
+
+	slog("INFO", "joiner", 0, fmt.Sprintf("WebSocket on 127.0.0.1:%d", wsPort), nil)
+	slog("INFO", "joiner", 0, fmt.Sprintf("SOCKS5 on %s", socksAddr), nil)
 
 	go func() {
-		addr := fmt.Sprintf("127.0.0.1:%d", wsPort)
-		logMsg("joiner: WebSocket on %s", addr)
-		if err := http.ListenAndServe(addr, mux); err != nil {
-			logMsg("joiner: ws server error: %v", err)
-		}
+		defer close(done)
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+
+		// WS server
+		go func() {
+			defer wg.Done()
+			if err := wsServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				slog("ERROR", "joiner", 0, "ws server error", err)
+			}
+		}()
+
+		// SOCKS listener
+		go func() {
+			defer wg.Done()
+			j.acceptSOCKS(ctx, socksLn)
+		}()
+
+		<-ctx.Done()
+		wsServer.Close()
+		socksLn.Close()
+		j.closeAllConns()
+		wg.Wait()
 	}()
-	addr := fmt.Sprintf("127.0.0.1:%d", socksPort)
-	logMsg("joiner: SOCKS5 on %s", addr)
-	return j.listenSOCKS(addr)
+
+	return relay, nil
 }
 
-func StartCreator(wsPort int, cb LogCallback) error {
+// StartCreator starts the creator relay. It returns a Relay handle immediately.
+func StartCreator(wsPort int, cb LogCallback) (*Relay, error) {
 	logCb = cb
-	c := &creatorRelay{
-		conns: sync.Map{},
-	}
-	mux := http.NewServeMux()
-	mux.HandleFunc("/ws", c.handleWS)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
 
-	addr := fmt.Sprintf("127.0.0.1:%d", wsPort)
-	logMsg("creator: WebSocket on %s", addr)
-	return http.ListenAndServe(addr, mux)
+	c := &creatorRelay{}
+	relay := &Relay{cancel: cancel, done: done}
+	c.metrics = &relay.metrics
+
+	wsMux := http.NewServeMux()
+	wsMux.HandleFunc("/ws", c.handleWS)
+
+	wsServer := &http.Server{
+		Addr:    fmt.Sprintf("127.0.0.1:%d", wsPort),
+		Handler: wsMux,
+	}
+
+	slog("INFO", "creator", 0, fmt.Sprintf("WebSocket on 127.0.0.1:%d", wsPort), nil)
+
+	go func() {
+		defer close(done)
+		go func() {
+			if err := wsServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				slog("ERROR", "creator", 0, "ws server error", err)
+			}
+		}()
+		<-ctx.Done()
+		wsServer.Close()
+		c.closeAllConns()
+	}()
+
+	return relay, nil
 }
+
+// ---------------------------------------------------------------------------
+// joinerRelay
+// ---------------------------------------------------------------------------
 
 type joinerRelay struct {
 	writerMu   sync.RWMutex
@@ -153,6 +333,7 @@ type joinerRelay struct {
 	conns      sync.Map
 	udpClients sync.Map
 	nextID     atomic.Uint32
+	metrics    *Metrics
 	ready      chan struct{}
 	once       sync.Once
 }
@@ -197,6 +378,14 @@ func (j *joinerRelay) currentWriter() *wsWriter {
 	return j.writer
 }
 
+func (j *joinerRelay) closeAllConns() {
+	j.conns.Range(func(key, val any) bool {
+		val.(*socksConn).conn.Close()
+		j.conns.Delete(key)
+		return true
+	})
+}
+
 func (j *joinerRelay) handleUDPAssociate(tcpConn net.Conn) {
 	udpAddr, err := net.ResolveUDPAddr("udp", "127.0.0.1:0")
 	if err != nil {
@@ -214,7 +403,7 @@ func (j *joinerRelay) handleUDPAssociate(tcpConn net.Conn) {
 	reply := []byte{0x05, 0x00, 0x00, 0x01, 127, 0, 0, 1, 0, 0}
 	binary.BigEndian.PutUint16(reply[8:10], uint16(localAddr.Port))
 	tcpConn.Write(reply)
-	logMsg("joiner: UDP ASSOCIATE on port %d", localAddr.Port)
+	slog("INFO", "joiner", 0, fmt.Sprintf("UDP ASSOCIATE on port %d", localAddr.Port), nil)
 
 	go func() {
 		buf := make([]byte, 1)
@@ -289,29 +478,64 @@ func (j *joinerRelay) handleUDPAssociate(tcpConn net.Conn) {
 func (j *joinerRelay) handleWS(w http.ResponseWriter, r *http.Request) {
 	ws, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		logMsg("joiner: ws upgrade error: %v", err)
+		slog("ERROR", "joiner", 0, "ws upgrade error", err)
 		return
 	}
 	writer := newWSWriter(ws)
 	j.swapWriter(writer)
 	defer j.clearWriter(writer)
 	j.once.Do(func() { close(j.ready) })
-	logMsg("joiner: browser connected via WebSocket")
+
+	// Send handshake.
+	j.send(0, msgHandshake, []byte{protocolVersion})
+	slog("INFO", "joiner", 0, "browser connected via WebSocket", nil)
+
+	// Start keepalive pinger.
+	stopPing := make(chan struct{})
+	defer close(stopPing)
+	go j.pinger(writer, stopPing)
+
 	for {
 		_, msg, err := ws.ReadMessage()
 		if err != nil {
-			logMsg("joiner: ws read error: %v", err)
+			slog("WARN", "joiner", 0, "ws read error", err)
 			return
 		}
 		connID, msgType, payload := decodeFrame(msg)
+		if msgType == msgPong || msgType == msgHandshake {
+			continue
+		}
+		if msgType == msgPing {
+			j.send(0, msgPong, nil)
+			continue
+		}
+		if len(payload) > 0 {
+			j.metrics.BytesRecv.Add(int64(len(payload)))
+		}
 		j.handleMessage(connID, msgType, payload)
+	}
+}
+
+func (j *joinerRelay) pinger(w *wsWriter, stop chan struct{}) {
+	ticker := time.NewTicker(pingInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+			j.send(0, msgPing, nil)
+		}
 	}
 }
 
 func (j *joinerRelay) handleMessage(connID uint32, msgType byte, payload []byte) {
 	if msgType == msgUDPReply {
-		uval, ok := j.udpClients.Load(connID)
+		uval, ok := j.udpClients.LoadAndDelete(connID)
 		if !ok {
+			return
+		}
+		if len(payload) == 0 {
 			return
 		}
 		uc := uval.(*udpClient)
@@ -319,7 +543,6 @@ func (j *joinerRelay) handleMessage(connID uint32, msgType byte, payload []byte)
 		copy(reply, uc.socksHeader)
 		copy(reply[len(uc.socksHeader):], payload)
 		uc.udpConn.WriteToUDP(reply, uc.clientAddr)
-		j.udpClients.Delete(connID)
 		return
 	}
 	val, ok := j.conns.Load(connID)
@@ -337,6 +560,7 @@ func (j *joinerRelay) handleMessage(connID uint32, msgType byte, payload []byte)
 	case msgClose:
 		sc.conn.Close()
 		j.conns.Delete(connID)
+		j.metrics.ActiveConns.Add(-1)
 	}
 }
 
@@ -350,25 +574,35 @@ func (j *joinerRelay) send(connID uint32, msgType byte, payload []byte) {
 	n := encodeFrameInto(buf, connID, msgType, payload)
 	w.send(buf[:n])
 	framePool.Put(bufp)
+	if len(payload) > 0 {
+		j.metrics.BytesSent.Add(int64(len(payload)))
+	}
 }
 
-func (j *joinerRelay) listenSOCKS(addr string) error {
-	ln, err := net.Listen("tcp", addr)
-	if err != nil {
-		return err
-	}
+func (j *joinerRelay) acceptSOCKS(ctx context.Context, ln net.Listener) {
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
-			logMsg("joiner: accept error: %v", err)
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			slog("WARN", "joiner", 0, "accept error", err)
 			continue
 		}
-		go j.handleSOCKS(conn)
+		go j.handleSOCKS(ctx, conn)
 	}
 }
 
-func (j *joinerRelay) handleSOCKS(conn net.Conn) {
-	<-j.ready
+func (j *joinerRelay) handleSOCKS(ctx context.Context, conn net.Conn) {
+	select {
+	case <-j.ready:
+	case <-ctx.Done():
+		conn.Close()
+		return
+	}
+
 	buf := make([]byte, 258)
 	n, err := conn.Read(buf)
 	if err != nil || n < 2 || buf[0] != 0x05 {
@@ -422,23 +656,56 @@ func (j *joinerRelay) handleSOCKS(conn net.Conn) {
 		conn.Close()
 		return
 	}
+	if j.metrics.ActiveConns.Load() >= maxConns {
+		slog("WARN", "joiner", 0, fmt.Sprintf("connection limit reached, rejecting %s", host), nil)
+		conn.Write([]byte{0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+		conn.Close()
+		return
+	}
+	j.metrics.ActiveConns.Add(1)
+	j.metrics.TotalConns.Add(1)
 	id := j.nextID.Add(1)
 	sc := &socksConn{id: id, conn: conn, j: j, rdy: make(chan error, 1)}
 	j.conns.Store(id, sc)
-	logMsg("joiner: CONNECT %d -> %s", id, host)
+	slog("INFO", "joiner", id, fmt.Sprintf("CONNECT -> %s", host), nil)
 	j.send(id, msgConnect, []byte(host))
-	if err := <-sc.rdy; err != nil {
-		logMsg("joiner: CONNECT %d failed: %v", id, err)
-		conn.Write([]byte{0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+	select {
+	case err := <-sc.rdy:
+		if err != nil {
+			slog("WARN", "joiner", id, "CONNECT failed", err)
+			conn.Write([]byte{0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+			conn.Close()
+			j.conns.Delete(id)
+			j.metrics.ActiveConns.Add(-1)
+			j.metrics.Errors.Add(1)
+			return
+		}
+	case <-time.After(connectTimeout):
+		slog("WARN", "joiner", id, "CONNECT timed out", nil)
+		conn.Write([]byte{0x05, 0x04, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
 		conn.Close()
 		j.conns.Delete(id)
+		j.metrics.ActiveConns.Add(-1)
+		j.metrics.Errors.Add(1)
+		return
+	case <-ctx.Done():
+		conn.Close()
+		j.conns.Delete(id)
+		j.metrics.ActiveConns.Add(-1)
 		return
 	}
 	conn.Write([]byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
-	logMsg("joiner: CONNECTED %d -> %s", id, host)
+	slog("INFO", "joiner", id, fmt.Sprintf("CONNECTED -> %s", host), nil)
 	go func() {
+		defer j.metrics.ActiveConns.Add(-1)
 		buf := make([]byte, readBufSize)
 		for {
+			// Backpressure: pause reading if WS buffer is full.
+			w := j.currentWriter()
+			if w != nil && w.backpressure() {
+				time.Sleep(10 * time.Millisecond)
+				continue
+			}
 			n, err := conn.Read(buf)
 			if n > 0 {
 				j.send(id, msgData, buf[:n])
@@ -452,10 +719,15 @@ func (j *joinerRelay) handleSOCKS(conn net.Conn) {
 	}()
 }
 
+// ---------------------------------------------------------------------------
+// creatorRelay
+// ---------------------------------------------------------------------------
+
 type creatorRelay struct {
 	writerMu sync.RWMutex
 	writer   *wsWriter
 	conns    sync.Map
+	metrics  *Metrics
 }
 
 func (c *creatorRelay) swapWriter(next *wsWriter) {
@@ -485,24 +757,64 @@ func (c *creatorRelay) currentWriter() *wsWriter {
 	return c.writer
 }
 
+func (c *creatorRelay) closeAllConns() {
+	c.conns.Range(func(key, val any) bool {
+		val.(net.Conn).Close()
+		c.conns.Delete(key)
+		return true
+	})
+}
+
 func (c *creatorRelay) handleWS(w http.ResponseWriter, r *http.Request) {
 	ws, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		logMsg("creator: ws upgrade error: %v", err)
+		slog("ERROR", "creator", 0, "ws upgrade error", err)
 		return
 	}
 	writer := newWSWriter(ws)
 	c.swapWriter(writer)
 	defer c.clearWriter(writer)
-	logMsg("creator: browser connected via WebSocket")
+
+	// Send handshake.
+	c.send(0, msgHandshake, []byte{protocolVersion})
+	slog("INFO", "creator", 0, "browser connected via WebSocket", nil)
+
+	// Start keepalive pinger.
+	stopPing := make(chan struct{})
+	defer close(stopPing)
+	go c.pinger(writer, stopPing)
+
 	for {
 		_, msg, err := ws.ReadMessage()
 		if err != nil {
-			logMsg("creator: ws read error: %v", err)
+			slog("WARN", "creator", 0, "ws read error", err)
 			return
 		}
 		connID, msgType, payload := decodeFrame(msg)
+		if msgType == msgPong || msgType == msgHandshake {
+			continue
+		}
+		if msgType == msgPing {
+			c.send(0, msgPong, nil)
+			continue
+		}
+		if len(payload) > 0 {
+			c.metrics.BytesRecv.Add(int64(len(payload)))
+		}
 		c.handleMessage(connID, msgType, payload)
+	}
+}
+
+func (c *creatorRelay) pinger(w *wsWriter, stop chan struct{}) {
+	ticker := time.NewTicker(pingInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+			c.send(0, msgPing, nil)
+		}
 	}
 }
 
@@ -535,6 +847,9 @@ func (c *creatorRelay) send(connID uint32, msgType byte, payload []byte) {
 	n := encodeFrameInto(buf, connID, msgType, payload)
 	w.send(buf[:n])
 	framePool.Put(bufp)
+	if len(payload) > 0 {
+		c.metrics.BytesSent.Add(int64(len(payload)))
+	}
 }
 
 func (c *creatorRelay) handleUDP(connID uint32, payload []byte) {
@@ -550,48 +865,74 @@ func (c *creatorRelay) handleUDP(connID uint32, payload []byte) {
 
 	udpAddr, err := net.ResolveUDPAddr("udp", addr)
 	if err != nil {
-		logMsg("creator: UDP resolve %s failed: %v", addr, err)
+		slog("WARN", "creator", connID, fmt.Sprintf("UDP resolve %s failed", addr), err)
+		c.send(connID, msgUDPReply, nil)
+		c.metrics.Errors.Add(1)
 		return
 	}
 	conn, err := net.DialUDP("udp", nil, udpAddr)
 	if err != nil {
-		logMsg("creator: UDP dial %s failed: %v", addr, err)
+		slog("WARN", "creator", connID, fmt.Sprintf("UDP dial %s failed", addr), err)
+		c.send(connID, msgUDPReply, nil)
+		c.metrics.Errors.Add(1)
 		return
 	}
 	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(5 * time.Second))
+	conn.SetDeadline(time.Now().Add(udpTimeout))
 	_, err = conn.Write(data)
 	if err != nil {
+		slog("WARN", "creator", connID, fmt.Sprintf("UDP write %s failed", addr), err)
+		c.send(connID, msgUDPReply, nil)
+		c.metrics.Errors.Add(1)
 		return
 	}
 	buf := make([]byte, 4096)
 	n, err := conn.Read(buf)
 	if err != nil {
+		slog("WARN", "creator", connID, fmt.Sprintf("UDP read %s failed", addr), err)
+		c.send(connID, msgUDPReply, nil)
+		c.metrics.Errors.Add(1)
 		return
 	}
 	c.send(connID, msgUDPReply, buf[:n])
 }
 
 func (c *creatorRelay) connect(connID uint32, addr string) {
-	logMsg("creator: CONNECT %d -> %s", connID, addr)
-	conn, err := net.DialTimeout("tcp", addr, 10e9)
+	if c.metrics.ActiveConns.Load() >= maxConns {
+		slog("WARN", "creator", connID, fmt.Sprintf("connection limit reached, rejecting %s", addr), nil)
+		c.send(connID, msgConnectErr, []byte("connection limit reached"))
+		return
+	}
+	c.metrics.ActiveConns.Add(1)
+	c.metrics.TotalConns.Add(1)
+	slog("INFO", "creator", connID, fmt.Sprintf("CONNECT -> %s", addr), nil)
+	conn, err := net.DialTimeout("tcp", addr, dialTimeout)
 	if err != nil {
-		logMsg("creator: CONNECT %d failed: %v", connID, err)
+		slog("WARN", "creator", connID, "CONNECT failed", err)
 		c.send(connID, msgConnectErr, []byte(err.Error()))
+		c.metrics.ActiveConns.Add(-1)
+		c.metrics.Errors.Add(1)
 		return
 	}
 	c.conns.Store(connID, conn)
 	c.send(connID, msgConnectOK, nil)
-	logMsg("creator: CONNECTED %d -> %s", connID, addr)
+	slog("INFO", "creator", connID, fmt.Sprintf("CONNECTED -> %s", addr), nil)
+	defer c.metrics.ActiveConns.Add(-1)
 	buf := make([]byte, readBufSize)
 	for {
+		// Backpressure: pause reading if WS buffer is full.
+		w := c.currentWriter()
+		if w != nil && w.backpressure() {
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
 		n, err := conn.Read(buf)
 		if n > 0 {
 			c.send(connID, msgData, buf[:n])
 		}
 		if err != nil {
 			if err != io.EOF {
-				logMsg("creator: conn %d read error: %v", connID, err)
+				slog("WARN", "creator", connID, "read error", err)
 			}
 			break
 		}

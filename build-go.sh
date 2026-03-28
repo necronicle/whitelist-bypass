@@ -48,6 +48,7 @@ cp mobile.aar ../android-app/app/libs/mobile.aar
 
 echo "Copying hooks to assets..."
 mkdir -p ../android-app/app/src/main/assets
+cp ../hooks/tunnel-core.js ../android-app/app/src/main/assets/tunnel-core.js
 cp ../hooks/joiner-vk.js ../android-app/app/src/main/assets/joiner-vk.js
 cp ../hooks/joiner-telemost.js ../android-app/app/src/main/assets/joiner-telemost.js
 

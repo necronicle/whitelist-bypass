@@ -3,9 +3,17 @@ const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 
+let autoUpdater;
+try {
+  autoUpdater = require('electron-updater').autoUpdater;
+} catch (_) {
+  // electron-updater not available in dev mode
+}
+
 const hooksDir = app.isPackaged
   ? path.join(process.resourcesPath, 'hooks')
   : path.join(__dirname, '..', 'hooks');
+const tunnelCore = fs.readFileSync(path.join(hooksDir, 'tunnel-core.js'), 'utf8');
 const hookVk = fs.readFileSync(path.join(hooksDir, 'creator-vk.js'), 'utf8');
 const hookTelemost = fs.readFileSync(path.join(hooksDir, 'creator-telemost.js'), 'utf8');
 const logCapture = "window.__hookLogs=window.__hookLogs||[];var _ol=console.log;console.log=function(){_ol.apply(console,arguments);var m=Array.prototype.slice.call(arguments).join(' ');if(m.indexOf('[HOOK]')!==-1)window.__hookLogs.push(m)};";
@@ -38,6 +46,7 @@ function buildHookCode(url) {
     '(function(){',
     '  if (window.__wbHookInstalled) return;',
     '  window.__wbHookInstalled = true;',
+    tunnelCore,
     hook,
     '})();'
   ].join('\n');
@@ -202,6 +211,22 @@ ipcMain.handle('get-hook-code', (e, url) => {
 app.whenReady().then(() => {
   startRelay();
   createWindow();
+
+  if (autoUpdater) {
+    autoUpdater.logger = { info: emitRelayLog, warn: emitRelayLog, error: emitRelayLog };
+    autoUpdater.autoDownload = true;
+    autoUpdater.autoInstallOnAppQuit = true;
+    autoUpdater.on('update-available', (info) => {
+      emitRelayLog(`Update available: v${info.version}`);
+    });
+    autoUpdater.on('update-downloaded', (info) => {
+      emitRelayLog(`Update v${info.version} downloaded, will install on quit`);
+    });
+    autoUpdater.on('error', (err) => {
+      emitRelayLog(`Auto-update error: ${err.message}`);
+    });
+    autoUpdater.checkForUpdatesAndNotify().catch(() => {});
+  }
 });
 
 app.on('window-all-closed', () => {
