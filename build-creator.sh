@@ -50,25 +50,25 @@ npm ci
 # macOS (universal binary already)
 echo ""
 echo "--- macOS ---"
-npx electron-builder --mac
+npx electron-builder --mac --publish never
 
 # Windows x64
 echo ""
 echo "--- Windows x64 ---"
 cp "$RELAY_DIR/relay-windows-x64.exe" "$RELAY_DIR/relay-bundle.exe"
-npx electron-builder --win --x64
+npx electron-builder --win --x64 --publish never
 
 # Windows x86
 echo ""
 echo "--- Windows x86 ---"
 cp "$RELAY_DIR/relay-windows-ia32.exe" "$RELAY_DIR/relay-bundle.exe"
-npx electron-builder --win --ia32
+npx electron-builder --win --ia32 --publish never
 
 # Linux x64
 echo ""
 echo "--- Linux x64 ---"
 cp "$RELAY_DIR/relay-linux-x64" "$RELAY_DIR/relay-bundle"
-npx electron-builder --linux --x64
+npx electron-builder --linux --x64 --publish never
 
 # Cleanup
 rm -f \
