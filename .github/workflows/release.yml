@@ -41,6 +41,7 @@ jobs:
             prebuilts/WhitelistBypass Creator-*.dmg.blockmap
             prebuilts/WhitelistBypass Creator-*.exe
             prebuilts/WhitelistBypass Creator-*.AppImage
+            prebuilts/headless-*
 
   android:
     runs-on: macos-14
@@ -123,7 +124,7 @@ jobs:
         run: |
           cd prebuilts
           find . -maxdepth 1 -type f \
-            \( -name 'WhitelistBypass Creator-*' -o -name 'whitelist-bypass.apk' \) \
+            \( -name 'WhitelistBypass Creator-*' -o -name 'whitelist-bypass.apk' -o -name 'headless-*' \) \
             -print | LC_ALL=C sort | while IFS= read -r file; do
               shasum -a 256 "$file"
             done > SHA256SUMS.txt
