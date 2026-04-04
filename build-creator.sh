@@ -42,6 +42,7 @@ ls -lh relay-darwin relay-windows-*.exe relay-linux-x64
 
 echo ""
 echo "=== Building headless creator ==="
+mkdir -p "$PREBUILTS_DIR"
 cd "$RELAY_DIR/headless"
 
 echo "macOS (universal)..."
