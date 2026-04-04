@@ -55,7 +55,20 @@ class MainActivity : AppCompatActivity() {
         assets.open("joiner-telemost.js").bufferedReader().readText()
     }
 
+    private val videoHookVk by lazy {
+        assets.open("video-vk.js").bufferedReader().readText()
+    }
+
+    private val videoHookTelemost by lazy {
+        assets.open("video-telemost.js").bufferedReader().readText()
+    }
+
+    private var transportMode = "dc" // "dc" or "vp8"
+
     private fun hookForUrl(url: String): String {
+        if (transportMode == "vp8") {
+            return if (url.contains("telemost.yandex")) videoHookTelemost else videoHookVk
+        }
         val hook = if (url.contains("telemost.yandex")) hookTelemost else hookVk
         return tunnelCore + "\n" + hook
     }

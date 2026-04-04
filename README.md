@@ -4,7 +4,11 @@ Tunnels internet traffic through video calling platforms (VK Call, Yandex Telemo
 
 ## How it works
 
-Video calling platforms use WebRTC with an SFU (Selective Forwarding Unit). The SFU forwards SCTP data channels between participants without inspecting them. This tool creates a DataChannel alongside the call's built-in channels and uses it as a bidirectional data pipe.
+Video calling platforms use WebRTC with an SFU (Selective Forwarding Unit). The SFU forwards data between participants without inspecting it. This tool has two transport modes:
+
+### DataChannel mode (default)
+
+Creates a DataChannel alongside the call's built-in channels and uses it as a bidirectional data pipe.
 
 - **VK Call**: Uses negotiated DataChannel id:2 (alongside VK's animoji channel id:1)
 - **Telemost**: Uses non-negotiated DataChannel labeled "sharing" (matching real screen sharing traffic), with SDP renegotiation via signaling WebSocket
@@ -33,20 +37,52 @@ DataChannel  <------- SFU ------->  DataChannel
                                         Internet
 ```
 
+### VP8 Video mode
+
+Encodes tunnel data inside VP8 video frames, making traffic indistinguishable from a real video call at the packet level. Uses Go Pion WebRTC library instead of browser WebRTC.
+
+Data format: `[0xFF marker][4B length][payload]`. The `0xFF` byte cannot appear as the first byte of a real VP8 frame, allowing the receiver to distinguish data from keepalive video.
+
+```
+Joiner (censored, Android)                Creator (free internet, desktop)
+
+All apps
+  |
+VpnService (captures all traffic)
+  |
+tun2socks (IP -> TCP)
+  |
+SOCKS5 proxy (Go, :1080)
+  |
+Go Pion relay bridge                      Go Pion relay bridge
+  |                                         |
+VP8 video track  <---- SFU ---->  VP8 video track
+  (data encoded in frames)          (data encoded in frames)
+                                            |
+                                        Go relay
+                                            |
+                                        Internet
+```
+
+Use `--transport vp8` flag or the dropdown in the Electron app to switch modes.
+
 Traffic goes through the platform's TURN servers which are whitelisted. To the network firewall it looks like a normal video call.
 
 ## Components
 
-- `hooks/` - JavaScript hooks injected into call pages. Separate hooks per platform and role:
-  - `joiner-vk.js`, `creator-vk.js` - VK Call hooks
-  - `joiner-telemost.js`, `creator-telemost.js` - Telemost hooks
-  - Hooks intercept RTCPeerConnection, create tunnel DataChannel, bridge to local WebSocket
+- `hooks/` - JavaScript hooks injected into call pages. Separate hooks per platform, role, and transport:
+  - `joiner-vk.js`, `creator-vk.js` - VK Call DataChannel hooks
+  - `joiner-telemost.js`, `creator-telemost.js` - Telemost DataChannel hooks
+  - `video-vk.js`, `video-telemost.js` - VP8 Video mode hooks (MockPeerConnection forwarding SDP/ICE to Go)
+  - DC hooks intercept RTCPeerConnection, create tunnel DataChannel, bridge to local WebSocket
+  - Video hooks replace RTCPeerConnection with a mock that forwards signaling to Go Pion via WS port 9001
   - Telemost hooks include fake media (camera/mic), message chunking (994B payload, 1000B total), and SDP renegotiation
 - `relay/` - Go relay binary and gomobile library
-  - SOCKS5 proxy with TCP CONNECT and UDP ASSOCIATE
-  - WebSocket server for browser-relay communication
+  - `relay/mobile/` - DataChannel mode relay: SOCKS5, WebSocket, binary framing `[4B connID][1B msgType][payload]`
+  - `relay/pion/` - VP8 Video mode relay: VP8 encoder/decoder, Pion WebRTC, signaling server, relay bridge
+  - `relay/headless/` - Headless creator: VK API authentication, call creation without browser
   - tun2socks (Android only, via build tags)
-  - Binary framing protocol: `[4B connID][1B msgType][payload]`
+  - IP address masking in logs for privacy
 - `android-app/` - Android joiner app
   - WebView loading call page with hook injection
   - VpnService capturing all device traffic
@@ -69,6 +105,9 @@ Run `./build-release.sh` to produce the full release set in `prebuilts/`:
 | `WhitelistBypass Creator-*-ia32.exe` | Windows x86 |
 | `WhitelistBypass Creator-*.AppImage` | Linux x64 |
 | `whitelist-bypass.apk` | Android |
+| `headless-darwin` | macOS headless creator |
+| `headless-linux-x64` | Linux headless creator |
+| `headless-windows-x64.exe` | Windows headless creator |
 | `SHA256SUMS.txt` | Checksums for release artifacts |
 
 ## Setup
@@ -78,9 +117,20 @@ Run `./build-release.sh` to produce the full release set in `prebuilts/`:
 Install and run the Electron app from `prebuilts/`. It bundles the Go relay automatically.
 
 1. Open the app
-2. Click "VK Call" or "Telemost" to open the platform's call landing page
-3. Log in, create a call
-4. Copy the join link, send it to the joiner
+2. Select transport mode: **DataChannel** (default) or **VP8 Video** (steganographic)
+3. Click "VK Call" or "Telemost" to open the platform's call landing page
+4. Log in, create a call
+5. Copy the join link, send it to the joiner
+
+### Headless creator (server, no GUI)
+
+For running the creator on a server without a browser:
+
+```sh
+./headless --cookies cookies.txt --platform vk --resource default
+```
+
+The headless creator authenticates via VK cookies, creates a call, and prints the join link. It uses VP8 Video mode with Pion WebRTC. Resource modes: `moderate` (64 MB), `default` (128 MB), `unlimited`.
 
 ### Joiner side (censored, Android)
 

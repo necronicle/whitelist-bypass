@@ -41,6 +41,26 @@ GOOS=linux GOARCH=amd64 go build -o relay-linux-x64 .
 ls -lh relay-darwin relay-windows-*.exe relay-linux-x64
 
 echo ""
+echo "=== Building headless creator ==="
+cd "$RELAY_DIR/headless"
+
+echo "macOS (universal)..."
+GOOS=darwin GOARCH=amd64 go build -o "$RELAY_DIR/headless-darwin-amd64" .
+GOOS=darwin GOARCH=arm64 go build -o "$RELAY_DIR/headless-darwin-arm64" .
+lipo -create -output "$PREBUILTS_DIR/headless-darwin" "$RELAY_DIR/headless-darwin-amd64" "$RELAY_DIR/headless-darwin-arm64"
+rm "$RELAY_DIR/headless-darwin-amd64" "$RELAY_DIR/headless-darwin-arm64"
+
+echo "Linux x64..."
+GOOS=linux GOARCH=amd64 go build -o "$PREBUILTS_DIR/headless-linux-x64" .
+
+echo "Windows x64..."
+GOOS=windows GOARCH=amd64 go build -o "$PREBUILTS_DIR/headless-windows-x64.exe" .
+
+ls -lh "$PREBUILTS_DIR"/headless-*
+
+cd "$RELAY_DIR"
+
+echo ""
 echo "=== Building Electron apps ==="
 cd "$CREATOR_DIR"
 cleanup_stale_outputs

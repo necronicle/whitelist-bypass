@@ -16,10 +16,13 @@ const hooksDir = app.isPackaged
 const tunnelCore = fs.readFileSync(path.join(hooksDir, 'tunnel-core.js'), 'utf8');
 const hookVk = fs.readFileSync(path.join(hooksDir, 'creator-vk.js'), 'utf8');
 const hookTelemost = fs.readFileSync(path.join(hooksDir, 'creator-telemost.js'), 'utf8');
+const videoHookVk = fs.readFileSync(path.join(hooksDir, 'video-vk.js'), 'utf8');
+const videoHookTelemost = fs.readFileSync(path.join(hooksDir, 'video-telemost.js'), 'utf8');
 const logCapture = "window.__hookLogs=window.__hookLogs||[];var _ol=console.log;console.log=function(){_ol.apply(console,arguments);var m=Array.prototype.slice.call(arguments).join(' ');if(m.indexOf('[HOOK]')!==-1)window.__hookLogs.push(m)};";
 
 let mainWindow;
 let relayProcess;
+let transportMode = 'dc'; // 'dc' or 'vp8'
 
 function hookTargetFromUrl(rawUrl) {
   try {
@@ -40,6 +43,20 @@ function buildHookCode(url) {
     return null;
   }
 
+  if (transportMode === 'vp8') {
+    // VP8 mode: use video hooks (no tunnel-core needed).
+    const hook = target === 'telemost' ? videoHookTelemost : videoHookVk;
+    return [
+      logCapture,
+      '(function(){',
+      '  if (window.__wbHookInstalled) return;',
+      '  window.__wbHookInstalled = true;',
+      hook,
+      '})();'
+    ].join('\n');
+  }
+
+  // DC mode: use DataChannel hooks with tunnel-core.
   const hook = target === 'telemost' ? hookTelemost : hookVk;
   return [
     logCapture,
@@ -115,7 +132,8 @@ function spawnRelay() {
     return;
   }
 
-  relayProcess = spawn(relayPath, ['--mode', 'creator'], {
+  const relayArgs = ['--mode', 'creator', '--transport', transportMode];
+  relayProcess = spawn(relayPath, relayArgs, {
     stdio: ['ignore', 'pipe', 'pipe']
   });
 
@@ -206,6 +224,19 @@ function killRelay() {
 
 ipcMain.handle('get-hook-code', (e, url) => {
   return buildHookCode(url);
+});
+
+ipcMain.on('set-transport-mode', (e, mode) => {
+  if (mode === 'dc' || mode === 'vp8') {
+    const changed = transportMode !== mode;
+    transportMode = mode;
+    emitRelayLog(`Transport mode: ${mode}`);
+    if (changed) {
+      // Restart relay with new transport mode.
+      killRelay();
+      setTimeout(startRelay, 500);
+    }
+  }
 });
 
 app.whenReady().then(() => {

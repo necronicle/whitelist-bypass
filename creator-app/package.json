@@ -1,6 +1,6 @@
 {
   "name": "whitelist-bypass-creator",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Desktop creator app for Whitelist Bypass tunnel sessions",
   "author": "whitelist-bypass contributors",
   "repository": "github:necronicle/whitelist-bypass",
@@ -25,7 +25,9 @@
     "extraResources": [
       { "from": "../hooks/tunnel-core.js", "to": "hooks/tunnel-core.js" },
       { "from": "../hooks/creator-vk.js", "to": "hooks/creator-vk.js" },
-      { "from": "../hooks/creator-telemost.js", "to": "hooks/creator-telemost.js" }
+      { "from": "../hooks/creator-telemost.js", "to": "hooks/creator-telemost.js" },
+      { "from": "../hooks/video-vk.js", "to": "hooks/video-vk.js" },
+      { "from": "../hooks/video-telemost.js", "to": "hooks/video-telemost.js" }
     ],
     "mac": {
       "target": "dmg",

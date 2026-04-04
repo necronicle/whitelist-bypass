@@ -51,5 +51,7 @@ mkdir -p ../android-app/app/src/main/assets
 cp ../hooks/tunnel-core.js ../android-app/app/src/main/assets/tunnel-core.js
 cp ../hooks/joiner-vk.js ../android-app/app/src/main/assets/joiner-vk.js
 cp ../hooks/joiner-telemost.js ../android-app/app/src/main/assets/joiner-telemost.js
+cp ../hooks/video-vk.js ../android-app/app/src/main/assets/video-vk.js
+cp ../hooks/video-telemost.js ../android-app/app/src/main/assets/video-telemost.js
 
 echo "Done. .aar size: $(du -h mobile.aar | cut -f1)"

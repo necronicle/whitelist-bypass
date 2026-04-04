@@ -12,6 +12,53 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+func TestMaskAddr(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"192.168.1.100:443", "192.168.x.x:443"},
+		{"10.0.0.1:80", "10.0.x.x:80"},
+		{"192.168.1.100", "192.168.x.x"},
+		{"[2001:db8::1]:443", "[x::x]:443"},
+		{"2001:db8::1", "x::x"},
+		{"example.com:443", "e***:443"},
+		{"example.com", "e***"},
+		{"a.io:8080", "a***:8080"},
+		{"", ""},
+	}
+	for _, tt := range tests {
+		got := maskAddr(tt.input)
+		if got != tt.want {
+			t.Errorf("maskAddr(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestMaskHost(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"192.168.1.100", "192.168.x.x"},
+		{"10.0.0.1", "10.0.x.x"},
+		{"2001:db8::1", "x::x"},
+		{"[::1]", "[x::x]"},
+		{"example.com", "e***"},
+		{"", ""},
+	}
+	for _, tt := range tests {
+		got := maskHost(tt.input)
+		if got != tt.want {
+			t.Errorf("maskHost(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
+
 func TestEncodeDecodeFrameRoundTrip(t *testing.T) {
 	t.Parallel()
 

@@ -102,6 +102,39 @@ func slog(level, component string, connID uint32, msg string, err error) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Address masking (privacy)
+// ---------------------------------------------------------------------------
+
+// maskHost partially redacts a host for log output.
+func maskHost(host string) string {
+	if host == "" {
+		return ""
+	}
+	// IPv4
+	if ip := net.ParseIP(host); ip != nil {
+		if ip4 := ip.To4(); ip4 != nil {
+			return fmt.Sprintf("%d.%d.x.x", ip4[0], ip4[1])
+		}
+		return "x::x"
+	}
+	// Bracketed IPv6 like [::1]
+	if host[0] == '[' && host[len(host)-1] == ']' {
+		return "[x::x]"
+	}
+	// Hostname
+	return string([]rune(host)[:1]) + "***"
+}
+
+// maskAddr partially redacts an address (host:port) for log output.
+func maskAddr(addr string) string {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return maskHost(addr)
+	}
+	return net.JoinHostPort(maskHost(host), port)
+}
+
 // logMsg is a short alias kept for brevity inside hot paths.
 func logMsg(format string, args ...any) {
 	msg := fmt.Sprintf(format, args...)
@@ -657,7 +690,7 @@ func (j *joinerRelay) handleSOCKS(ctx context.Context, conn net.Conn) {
 		return
 	}
 	if j.metrics.ActiveConns.Load() >= maxConns {
-		slog("WARN", "joiner", 0, fmt.Sprintf("connection limit reached, rejecting %s", host), nil)
+		slog("WARN", "joiner", 0, fmt.Sprintf("connection limit reached, rejecting %s", maskAddr(host)), nil)
 		conn.Write([]byte{0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
 		conn.Close()
 		return
@@ -667,7 +700,7 @@ func (j *joinerRelay) handleSOCKS(ctx context.Context, conn net.Conn) {
 	id := j.nextID.Add(1)
 	sc := &socksConn{id: id, conn: conn, j: j, rdy: make(chan error, 1)}
 	j.conns.Store(id, sc)
-	slog("INFO", "joiner", id, fmt.Sprintf("CONNECT -> %s", host), nil)
+	slog("INFO", "joiner", id, fmt.Sprintf("CONNECT -> %s", maskAddr(host)), nil)
 	j.send(id, msgConnect, []byte(host))
 	select {
 	case err := <-sc.rdy:
@@ -695,7 +728,7 @@ func (j *joinerRelay) handleSOCKS(ctx context.Context, conn net.Conn) {
 		return
 	}
 	conn.Write([]byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
-	slog("INFO", "joiner", id, fmt.Sprintf("CONNECTED -> %s", host), nil)
+	slog("INFO", "joiner", id, fmt.Sprintf("CONNECTED -> %s", maskAddr(host)), nil)
 	go func() {
 		defer j.metrics.ActiveConns.Add(-1)
 		buf := make([]byte, readBufSize)
@@ -865,14 +898,14 @@ func (c *creatorRelay) handleUDP(connID uint32, payload []byte) {
 
 	udpAddr, err := net.ResolveUDPAddr("udp", addr)
 	if err != nil {
-		slog("WARN", "creator", connID, fmt.Sprintf("UDP resolve %s failed", addr), err)
+		slog("WARN", "creator", connID, fmt.Sprintf("UDP resolve %s failed", maskAddr(addr)), err)
 		c.send(connID, msgUDPReply, nil)
 		c.metrics.Errors.Add(1)
 		return
 	}
 	conn, err := net.DialUDP("udp", nil, udpAddr)
 	if err != nil {
-		slog("WARN", "creator", connID, fmt.Sprintf("UDP dial %s failed", addr), err)
+		slog("WARN", "creator", connID, fmt.Sprintf("UDP dial %s failed", maskAddr(addr)), err)
 		c.send(connID, msgUDPReply, nil)
 		c.metrics.Errors.Add(1)
 		return
@@ -881,7 +914,7 @@ func (c *creatorRelay) handleUDP(connID uint32, payload []byte) {
 	conn.SetDeadline(time.Now().Add(udpTimeout))
 	_, err = conn.Write(data)
 	if err != nil {
-		slog("WARN", "creator", connID, fmt.Sprintf("UDP write %s failed", addr), err)
+		slog("WARN", "creator", connID, fmt.Sprintf("UDP write %s failed", maskAddr(addr)), err)
 		c.send(connID, msgUDPReply, nil)
 		c.metrics.Errors.Add(1)
 		return
@@ -889,7 +922,7 @@ func (c *creatorRelay) handleUDP(connID uint32, payload []byte) {
 	buf := make([]byte, 4096)
 	n, err := conn.Read(buf)
 	if err != nil {
-		slog("WARN", "creator", connID, fmt.Sprintf("UDP read %s failed", addr), err)
+		slog("WARN", "creator", connID, fmt.Sprintf("UDP read %s failed", maskAddr(addr)), err)
 		c.send(connID, msgUDPReply, nil)
 		c.metrics.Errors.Add(1)
 		return
@@ -899,13 +932,13 @@ func (c *creatorRelay) handleUDP(connID uint32, payload []byte) {
 
 func (c *creatorRelay) connect(connID uint32, addr string) {
 	if c.metrics.ActiveConns.Load() >= maxConns {
-		slog("WARN", "creator", connID, fmt.Sprintf("connection limit reached, rejecting %s", addr), nil)
+		slog("WARN", "creator", connID, fmt.Sprintf("connection limit reached, rejecting %s", maskAddr(addr)), nil)
 		c.send(connID, msgConnectErr, []byte("connection limit reached"))
 		return
 	}
 	c.metrics.ActiveConns.Add(1)
 	c.metrics.TotalConns.Add(1)
-	slog("INFO", "creator", connID, fmt.Sprintf("CONNECT -> %s", addr), nil)
+	slog("INFO", "creator", connID, fmt.Sprintf("CONNECT -> %s", maskAddr(addr)), nil)
 	conn, err := net.DialTimeout("tcp", addr, dialTimeout)
 	if err != nil {
 		slog("WARN", "creator", connID, "CONNECT failed", err)
@@ -916,7 +949,7 @@ func (c *creatorRelay) connect(connID uint32, addr string) {
 	}
 	c.conns.Store(connID, conn)
 	c.send(connID, msgConnectOK, nil)
-	slog("INFO", "creator", connID, fmt.Sprintf("CONNECTED -> %s", addr), nil)
+	slog("INFO", "creator", connID, fmt.Sprintf("CONNECTED -> %s", maskAddr(addr)), nil)
 	defer c.metrics.ActiveConns.Add(-1)
 	buf := make([]byte, readBufSize)
 	for {

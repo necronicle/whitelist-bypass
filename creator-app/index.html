@@ -30,6 +30,10 @@ body { font-family: -apple-system, sans-serif; background: #1a1a1a; color: #e0e0
   <button class="btn-home" onclick="goHome()">Home</button>
   <button class="btn-vk" onclick="loadURL('https://vk.com/calls')">VK Call</button>
   <button class="btn-telemost" onclick="loadURL('https://telemost.yandex.ru/')">Telemost</button>
+  <select id="transportMode" onchange="setTransport(this.value)" style="padding:4px 8px;border:none;border-radius:6px;font-size:12px;background:#333;color:#e0e0e0;cursor:pointer">
+    <option value="dc">DataChannel</option>
+    <option value="vp8">VP8 Video</option>
+  </select>
   <div class="link-text" id="currentUrl">No page loaded</div>
 </div>
 <div class="content" id="content">
@@ -147,6 +151,11 @@ setInterval(function() {
       logs.forEach(function(msg) { appendHookLog(msg); });
     }).catch(function() {});
 }, 500);
+
+function setTransport(mode) {
+  window.bridge.setTransportMode(mode);
+  appendRelayLog('Transport mode set to: ' + mode);
+}
 
 window.bridge.onRelayLog(function(msg) {
   appendRelayLog(msg);

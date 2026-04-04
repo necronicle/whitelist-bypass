@@ -13,4 +13,6 @@ relay/mobile-sources.jar
 relay/relay
 relay/mobile.aar
 relay/relay-*
+relay/headless/headless
+relay/headless/headless-*
 prebuilts/
