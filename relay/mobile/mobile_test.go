@@ -313,6 +313,7 @@ func TestSOCKS5Handshake(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer relay.Stop()
+	waitForPort(t, wsPort)
 	waitForPort(t, socksPort)
 
 	// Connect WS to joiner (simulates JS hook).
